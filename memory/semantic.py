@@ -141,6 +141,49 @@ class SemanticMemory:
         cosine_sim = 1.0 - distance
         return cosine_sim > threshold
 
+    async def get_best_wins(self, k: int = 3) -> list[MemoryEntry]:
+        """Return the k highest-scoring wins, ordered by score descending."""
+        count = await asyncio.to_thread(self._table.count_rows)
+        if count == 0:
+            return []
+
+        def _fetch() -> list[dict]:
+            import pandas as pd
+            df = self._table.to_pandas()
+            wins = (
+                df[df["outcome"] == OutcomeType.WIN.value]
+                .sort_values("score", ascending=False)
+                .head(k)
+            )
+            return wins.to_dict(orient="records")
+
+        rows = await asyncio.to_thread(_fetch)
+        return [self._row_to_entry(r) for r in rows]
+
+    async def is_building_on_win(self, text: str, similarity_floor: float = 0.80) -> bool:
+        """True if text is semantically close to a past win — it may be an incremental improvement."""
+        count = await asyncio.to_thread(self._table.count_rows)
+        if count == 0:
+            return False
+
+        vector = await self.embed(text)
+
+        def _search() -> list[dict]:
+            return (
+                self._table.search(vector)
+                .where(f"outcome = '{OutcomeType.WIN.value}'")
+                .limit(1)
+                .to_list()
+            )
+
+        rows = await asyncio.to_thread(_search)
+        if not rows:
+            return False
+
+        distance = rows[0].get("_distance", 1.0)
+        cosine_sim = 1.0 - distance
+        return cosine_sim > similarity_floor
+
     async def top_failures(self, context: str, k: int = 5) -> list[MemoryEntry]:
         count = await asyncio.to_thread(self._table.count_rows)
         if count == 0:

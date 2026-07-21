@@ -38,35 +38,45 @@ from .integrator import (
 
 logger = logging.getLogger(__name__)
 
-HYPOTHESIS_SYSTEM = """You are a scientific software engineering coordinator. Your job is to form ONE concrete, testable hypothesis about how to improve the target codebase's test pass-rate score.
+HYPOTHESIS_SYSTEM = """You are an intelligent software engineering researcher. Your goal is to iteratively improve a codebase's test pass-rate score by forming one concrete, actionable hypothesis per iteration.
 
-Rules:
-1. The hypothesis must be specific and actionable (name files/functions to change).
-2. It must NOT repeat a previously failed hypothesis.
-3. Ground it in the retrieved memory and current code state.
-4. Output ONLY JSON: {"hypothesis": "...", "rationale": "...", "target_files": ["..."]}
-"""
+Reasoning strategy — follow this in order:
+1. FOLLOW THE GRADIENT — if the score has been improving recently, continue refining that direction.
+2. BUILD ON SUCCESS — if a past hypothesis scored well, improve upon it rather than abandoning it entirely.
+3. AVOID DEAD ENDS — do not repeat an approach that already failed and showed no score improvement.
+4. STAY INCREMENTAL — prefer a small targeted change over a large rewrite; small wins compound.
 
-HYPOTHESIS_USER = """Current iteration: {iteration}
-Current baseline score: {baseline:.4f}
+Output ONLY JSON: {"hypothesis": "...", "rationale": "...", "target_files": ["..."]}"""
+
+HYPOTHESIS_USER = """Iteration: {iteration}  |  Current baseline score: {baseline:.4f}
+
+Recent score trajectory (newest first):
+{trajectory}
+
+Best approach so far (highest scoring win):
+{best_win}
 
 {context}
 
-Form exactly ONE new hypothesis to improve the score.
-Do NOT repeat hypotheses that previously FAILED.
+Form ONE hypothesis that improves the score.
+- If the trajectory is trending upward, refine or extend the best approach.
+- If progress has stalled, try a meaningfully different angle.
+- Name the specific files and functions you intend to change.
 Output JSON only."""
 
-NOVELTY_SYSTEM = """You are a scientific software engineering coordinator. The previous hypothesis was too similar to a past failure. Form a NOVEL hypothesis that avoids all previously tried approaches.
+NOVELTY_SYSTEM = """You are an intelligent software engineering researcher. The agent is stuck — the last hypothesis was nearly identical to a past failure with no improvement signal.
+
+Your job is to generate a NOVEL hypothesis that breaks out of the current dead end.
 
 Output ONLY JSON: {"hypothesis": "...", "rationale": "...", "target_files": [...]}"""
 
-NOVELTY_USER = """Rejected hypothesis (too similar to a past failure):
+NOVELTY_USER = """Stuck hypothesis (too similar to a past failure, no win nearby):
 {rejected_hypothesis}
 
-Past failures to AVOID:
+Recent failures to AVOID repeating:
 {past_failures}
 
-Form a NOVEL hypothesis that tries a different approach entirely.
+Break out by trying a completely different area of the codebase or a different type of improvement.
 Output JSON only."""
 
 
@@ -98,7 +108,7 @@ class Coordinator:
         self.repo_path: str = config["target_repo"]
         self.worktree_root: str = config.get("worktree_root", "/tmp/auto-researcher/worktrees")
         self.max_subagents: int = config.get("max_subagents", 4)
-        self.dup_threshold: float = config.get("dup_threshold", 0.92)
+        self.dup_threshold: float = config.get("dup_threshold", 0.97)
         self.novelty_boost: float = config.get("novelty_boost", 0.3)
         self.token_budget: int = config.get("context_token_budget", 8192)
         self.coord_ratios: dict[str, float] = config.get(
@@ -155,13 +165,21 @@ class Coordinator:
         hyp = await self.form_hypothesis()
         self._current_hypothesis = hyp
 
-        # 2. Anti-repetition gate
+        # 2. Anti-repetition gate — only block near-exact failure duplicates that
+        #    are NOT building on a past win (which would be an incremental improvement).
         is_dup = await self.memory.is_duplicate_failure(hyp.text)
         if is_dup:
-            logger.info("Hypothesis rejected as duplicate failure; reforming with novelty")
-            await aemit(EventType.DUP_REJECTED, {"hypothesis": hyp.text}, iteration=n)
-            hyp = await self.reform_with_novelty(hyp)
-            self._current_hypothesis = hyp
+            building_on_win = await self.memory.is_building_on_win(hyp.text)
+            if building_on_win:
+                logger.info(
+                    "Hypothesis is similar to a failure but also close to a past win — "
+                    "allowing through as an incremental improvement attempt"
+                )
+            else:
+                logger.info("Hypothesis is a near-exact failure duplicate with no win nearby; reforming")
+                await aemit(EventType.DUP_REJECTED, {"hypothesis": hyp.text}, iteration=n)
+                hyp = await self.reform_with_novelty(hyp)
+                self._current_hypothesis = hyp
 
         # 3. Decompose + route models
         briefs = await self.decompose(hyp)
@@ -243,6 +261,7 @@ class Coordinator:
             "improve test score", k=5, include_failures=False
         )
         failures = await self.memory.top_failures("improvement hypothesis", k=5)
+        best_wins = await self.memory.get_best_wins(k=3)
         file_slices = self._load_file_slices(max_files=8)
 
         context = assemble_coordinator_context(
@@ -265,6 +284,8 @@ class Coordinator:
                 content=HYPOTHESIS_USER.format(
                     iteration=n,
                     baseline=self.baseline,
+                    trajectory=self._format_trajectory(last_n=7),
+                    best_win=self._format_best_win(best_wins),
                     context=context,
                 ),
             ),
@@ -675,6 +696,26 @@ class Coordinator:
             if ".git" not in f.parts
         ]
         return "\n".join(files[:max_files])
+
+    def _format_trajectory(self, last_n: int = 7) -> str:
+        """Return a compact score history string for the hypothesis prompt."""
+        records = self.memory.get_recent_iterations(last_n)
+        if not records:
+            return "(no history yet — this is the first iteration)"
+        lines = []
+        for r in records:  # already sorted newest-first by get_recent_iterations
+            arrow = "↑" if r.outcome.value == "win" else "↓"
+            lines.append(
+                f"  iter {r.iteration:>3}  score={r.score:.4f} {arrow}  {r.hypothesis[:80]}"
+            )
+        return "\n".join(lines)
+
+    def _format_best_win(self, best_wins: list) -> str:
+        """Format the highest-scoring past win for the hypothesis prompt."""
+        if not best_wins:
+            return "(none yet)"
+        top = best_wins[0]
+        return f'score={top.score:.4f}: "{top.text}"'
 
     def pause(self) -> None:
         self.pause_gate.clear()

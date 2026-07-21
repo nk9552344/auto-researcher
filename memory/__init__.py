@@ -60,6 +60,12 @@ class Memory:
     async def top_failures(self, context: str, k: int = 5) -> list[MemoryEntry]:
         return await self._semantic.top_failures(context, k=k)
 
+    async def get_best_wins(self, k: int = 3) -> list[MemoryEntry]:
+        return await self._semantic.get_best_wins(k=k)
+
+    async def is_building_on_win(self, hypothesis_text: str, similarity_floor: float = 0.80) -> bool:
+        return await self._semantic.is_building_on_win(hypothesis_text, similarity_floor=similarity_floor)
+
     def load_state(self) -> Optional[AgentState]:
         return self._state.load_state()
 
