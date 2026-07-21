@@ -19,10 +19,9 @@ class WorkerConfig:
 
 
 class ModelRegistry:
-    """Loads model config and validates models exist in Ollama at startup."""
+    """Loads model configuration from config.yaml."""
 
     def __init__(self, config: dict[str, Any]) -> None:
-        self._ollama_host: str = config.get("ollama_host", "http://localhost:11434")
         models_cfg: dict[str, Any] = config.get("models", config)
 
         coordinator_name: str | None = models_cfg.get("coordinator")
@@ -47,37 +46,46 @@ class ModelRegistry:
             for w in raw_workers
         ]
 
-    async def validate(self) -> None:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{self._ollama_host}/api/tags")
-            response.raise_for_status()
-            data = response.json()
+    async def validate(self, ollama_host: str) -> None:
+        """Check that Ollama is reachable and every configured model is available."""
+        url = ollama_host.rstrip("/") + "/api/tags"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.ConnectError:
+            raise RuntimeError(
+                f"Cannot connect to Ollama at {ollama_host}. "
+                "Make sure Ollama is running (`ollama serve`)."
+            )
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"Ollama returned an unexpected response ({exc.response.status_code}) "
+                f"from {url}."
+            )
 
         available: set[str] = {m["name"] for m in data.get("models", [])}
 
-        required: list[str] = [
-            self._coordinator.name,
-            self._default.name,
-            self._embed_model,
-            *(w.name for w in self._workers),
-        ]
+        required: dict[str, str] = {
+            "models.coordinator": self._coordinator.name,
+            "models.default": self._default.name,
+            "models.embed": self._embed_model,
+        }
+        for i, w in enumerate(self._workers):
+            required[f"models.workers[{i}]"] = w.name
 
-        missing = [name for name in required if name not in available]
+        missing: list[str] = []
+        for config_key, name in required.items():
+            if name not in available:
+                missing.append(f"  {config_key}: '{name}'  →  ollama pull {name}")
+
         if missing:
             raise ValueError(
-                f"The following models are not available in Ollama "
-                f"(run `ollama pull <name>`): {missing}"
+                "The following models from config.yaml are not available in Ollama:\n"
+                + "\n".join(missing)
+                + "\n\nPull the missing models and restart."
             )
-
-        all_skills: list[str] = []
-        for worker in self._workers:
-            for skill in worker.skills:
-                if skill in all_skills:
-                    logger.warning(
-                        "Duplicate skill tag %r found across workers", skill
-                    )
-                else:
-                    all_skills.append(skill)
 
     @property
     def coordinator(self) -> ModelSpec:

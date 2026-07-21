@@ -75,17 +75,17 @@ async def startup(config: dict[str, Any]) -> None:
     )
     await memory.init()
 
-    # ── Model registry + validation ───────────────────────────────────────────
+    # ── Model registry ────────────────────────────────────────────────────────
     logger.info("Loading model registry...")
     registry = ModelRegistry(config)
-    logger.info("Validating models against Ollama at %s...", ollama_host)
+    logger.info("Checking model availability in Ollama at %s...", ollama_host)
     try:
-        await registry.validate()
-    except ValueError as exc:
-        logger.error("Model validation failed: %s", exc)
+        await registry.validate(ollama_host)
+    except (ValueError, RuntimeError) as exc:
+        logger.error("%s", exc)
         sys.exit(1)
     logger.info(
-        "Models OK — coordinator=%s default=%s workers=%d",
+        "Models OK — coordinator=%s  default=%s  workers=%d",
         registry.coordinator.name,
         registry.default.name,
         len(registry.workers),

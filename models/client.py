@@ -102,11 +102,6 @@ class OllamaClient:
         response.raise_for_status()
         return response.json()["embedding"]
 
-    async def list_models(self) -> list[str]:
-        response = await self._client.get("/api/tags")
-        response.raise_for_status()
-        return [m["name"] for m in response.json().get("models", [])]
-
     @property
     def registry(self) -> ModelRegistry:
         return self._registry
