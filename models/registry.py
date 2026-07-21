@@ -25,12 +25,15 @@ class ModelRegistry:
         models_cfg: dict[str, Any] = config.get("models", config)
 
         coordinator_name: str | None = models_cfg.get("coordinator")
-        default_name: str | None = models_cfg.get("default")
-
         if not coordinator_name:
             raise ValueError("models.coordinator is required in config")
-        if not default_name:
-            raise ValueError("models.default is required in config")
+
+        default_name: str = models_cfg.get("default") or coordinator_name
+        if not models_cfg.get("default"):
+            logger.info(
+                "models.default not set — using coordinator model (%s) for worker fallback",
+                coordinator_name,
+            )
 
         self._coordinator = ModelSpec(name=coordinator_name)
         self._default = ModelSpec(name=default_name)

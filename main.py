@@ -20,6 +20,49 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 
+def _available_ram_mb() -> int:
+    """Return available RAM in MB, or 0 if it cannot be determined."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024  # kB → MB
+    except OSError:
+        pass
+    return 0
+
+
+def _cap_max_subagents(config: dict[str, Any]) -> None:
+    """Warn and auto-cap max_subagents if it exceeds what this machine can safely handle."""
+    requested: int = config.get("max_subagents", 4)
+    cpu_cores: int = os.cpu_count() or 1
+    ram_mb: int = _available_ram_mb()
+
+    # Leave 1 core free for the coordinator + OS overhead.
+    cpu_limit: int = max(1, cpu_cores - 1)
+
+    # Each subagent spawns subprocess tool calls; budget ~256 MB of headroom per agent.
+    # If RAM is unknown (0), skip the RAM cap.
+    ram_limit: int = max(1, ram_mb // 256) if ram_mb > 0 else requested
+
+    safe: int = min(cpu_limit, ram_limit)
+
+    ram_display = f"{ram_mb} MB" if ram_mb > 0 else "unknown"
+    if requested > safe:
+        logger.warning(
+            "max_subagents=%d may exceed this machine's capacity "
+            "(CPU cores=%d, available RAM=%s). "
+            "Auto-capping to %d to prevent resource exhaustion.",
+            requested, cpu_cores, ram_display, safe,
+        )
+        config["max_subagents"] = safe
+    else:
+        logger.info(
+            "Resource check OK — max_subagents=%d, CPU cores=%d, available RAM=%s",
+            requested, cpu_cores, ram_display,
+        )
+
+
 def load_config(path: str = "config.yaml") -> dict[str, Any]:
     cfg_path = Path(path)
     if not cfg_path.exists():
@@ -44,10 +87,8 @@ def load_config(path: str = "config.yaml") -> dict[str, Any]:
     if not models.get("coordinator"):
         logger.error("models.coordinator is required in config.yaml")
         sys.exit(1)
-    if not models.get("default"):
-        logger.error("models.default is required in config.yaml")
-        sys.exit(1)
 
+    _cap_max_subagents(cfg)
     return cfg
 
 
